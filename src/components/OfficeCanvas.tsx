@@ -441,119 +441,6 @@ function fmtTokens(n: number): string {
   return `${n}`;
 }
 
-function drawMonitor(
-  ctx: CanvasRenderingContext2D,
-  cw: number,
-  ch: number,
-  fontPx: number,
-  fontFamily: string,
-  stats: UsageStats | null,
-  working: number,
-  totalCost: number,
-) {
-  const green = "#5aff8a";
-  const dim = "#3d7a55";
-  const pad = 6;
-  const rowH = fontPx + 5;
-
-  ctx.save();
-  ctx.textAlign = "left";
-  ctx.font = `${fontPx}px ${fontFamily}`;
-
-  const w5 = stats?.window5h ?? null;
-  const ratio = w5 && w5.peakTokens > 0 ? w5.tokens / w5.peakTokens : 0;
-
-  type Row =
-    | { kind: "text"; text: string; color: string }
-    | { kind: "bar"; label: string; value: string; ratio: number };
-
-  const rows: Row[] = [{ kind: "text", text: "■ AI USAGE (ccusage)", color: dim }];
-  if (w5) {
-    rows.push({ kind: "bar", label: "5h窓", value: fmtTokens(w5.tokens), ratio });
-    rows.push({
-      kind: "text",
-      text: ` ピーク比${Math.round(ratio * 100)}%  ≈$${w5.cost.toFixed(2)}`,
-      color: dim,
-    });
-  } else {
-    rows.push({ kind: "text", text: "5h窓 --", color: dim });
-  }
-  rows.push(
-    stats?.today
-      ? {
-          kind: "text",
-          text: `今日 ${fmtTokens(stats.today.tokens)}  ≈$${stats.today.cost.toFixed(2)}`,
-          color: green,
-        }
-      : { kind: "text", text: "今日 --", color: dim },
-  );
-  if (stats?.month) {
-    const m = stats.month;
-    const breakdown =
-      m.codex > 0.005
-        ? ` (CL$${m.claude.toFixed(0)}+CX$${m.codex.toFixed(0)})`
-        : "";
-    rows.push({
-      kind: "text",
-      text: `今月 ≈$${m.total.toFixed(2)}${breakdown}`,
-      color: green,
-    });
-  } else {
-    rows.push({ kind: "text", text: "今月 --", color: dim });
-  }
-  rows.push({
-    kind: "text",
-    text: `稼働 ${working}名  Σ$${totalCost.toFixed(2)}`,
-    color: green,
-  });
-
-  const BAR_W = fontPx * 7;
-  const GAP = 6;
-  const rowWidth = (row: Row) =>
-    row.kind === "text"
-      ? ctx.measureText(row.text).width
-      : ctx.measureText(row.label).width + GAP + BAR_W + GAP + ctx.measureText(row.value).width;
-  const panelW = Math.ceil(Math.max(...rows.map(rowWidth))) + pad * 2;
-  const panelH = rowH * rows.length + pad * 2;
-  const px = cw - panelW - 10;
-  const py = ch - panelH - 10;
-
-  ctx.fillStyle = "rgba(12,14,18,0.85)";
-  ctx.strokeStyle = "#3d5a45";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.roundRect(px, py, panelW, panelH, 4);
-  ctx.fill();
-  ctx.stroke();
-
-  let y = py + pad + fontPx;
-  for (const row of rows) {
-    if (row.kind === "text") {
-      ctx.fillStyle = row.color;
-      ctx.fillText(row.text, px + pad, y);
-    } else {
-      ctx.fillStyle = green;
-      ctx.fillText(row.label, px + pad, y);
-      const bx = px + pad + ctx.measureText(row.label).width + GAP;
-      const bh = fontPx * 0.7;
-      ctx.strokeStyle = dim;
-      ctx.strokeRect(bx, y - bh + 1, BAR_W, bh);
-      ctx.fillStyle =
-        row.ratio > 0.85 ? "#ff5a5a" : row.ratio > 0.6 ? "#ffc94f" : green;
-      ctx.fillRect(
-        bx + 1,
-        y - bh + 2,
-        Math.max(0, (BAR_W - 2) * Math.min(1, row.ratio)),
-        bh - 2,
-      );
-      ctx.fillStyle = green;
-      ctx.fillText(row.value, bx + BAR_W + GAP, y);
-    }
-    y += rowH;
-  }
-  ctx.restore();
-}
-
 // ---- クライアント側のキャラ状態 ----
 
 interface Actor {
@@ -588,14 +475,17 @@ export default function OfficeCanvas() {
   const layoutRef = useRef<Layout | null>(null);
   const layoutKeyRef = useRef("");
   const actorsRef = useRef<Map<string, Actor>>(new Map());
-  const statsRef = useRef<UsageStats | null>(null);
+  /** クリック位置→論理座標変換用に現在のスケールを保持 */
+  const scaleRef = useRef(1);
 
   const [connected, setConnected] = useState(false);
   const [office, setOffice] = useState<OfficeState | null>(null);
-  const [text, setText] = useState("");
-  const [target, setTarget] = useState("orchestrator");
-  const [sending, setSending] = useState(false);
+  const [stats, setStats] = useState<UsageStats | null>(null);
   const [openReport, setOpenReport] = useState<string | null>(null);
+  /** クリックで選択中の社員(モーダル表示) */
+  const [selected, setSelected] = useState<string | null>(null);
+  /** 右下のオーケストレータ指示フォームの開閉 */
+  const [formOpen, setFormOpen] = useState(false);
 
   // 状態の受信(SSE)
   useEffect(() => {
@@ -642,7 +532,7 @@ export default function OfficeCanvas() {
     const poll = async () => {
       try {
         const res = await fetch("/api/system");
-        if (!stopped && res.ok) statsRef.current = await res.json();
+        if (!stopped && res.ok) setStats(await res.json());
       } catch {
         // サーバー停止中などは無視
       }
@@ -709,6 +599,7 @@ export default function OfficeCanvas() {
       }
 
       const scale = Math.min(pw / lw, ph / lh);
+      scaleRef.current = scale;
       const cw = Math.floor(lw * scale);
       const ch = Math.floor(lh * scale);
       const dpr = window.devicePixelRatio || 1;
@@ -978,50 +869,51 @@ export default function OfficeCanvas() {
         }
       }
 
-      // --- リソースモニタ(右下常時表示) ---
-      const working = officeState
-        ? Object.values(officeState.statuses).filter((s) => s.state === "working")
-            .length
-        : 0;
-      const totalCost = officeState
-        ? officeState.orders.reduce((sum, o) => sum + (o.costUsd ?? 0), 0)
-        : 0;
-      drawMonitor(ctx, cw, ch, fontPx, fontFamily, statsRef.current, working, totalCost);
     };
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const submitOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!text.trim() || sending) return;
-    setSending(true);
-    try {
-      await fetch("/api/orders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, target }),
-      });
-      setText("");
-    } finally {
-      setSending(false);
+
+  // キャンバスクリック: キャラに当たっていればモーダルを開く
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scale = scaleRef.current || 1;
+    const x = (e.clientX - rect.left) / scale;
+    const y = (e.clientY - rect.top) / scale;
+    let best: string | null = null;
+    let bestDist = Infinity;
+    for (const actor of actorsRef.current.values()) {
+      const dx = x - actor.x;
+      const dy = y - actor.y;
+      // スプライト+足元ラベルのあたり判定
+      if (Math.abs(dx) <= 13 && dy >= -12 && dy <= 22) {
+        const d = dx * dx + dy * dy;
+        if (d < bestDist) {
+          bestDist = d;
+          best = actor.agent;
+        }
+      }
     }
+    if (best) setSelected(best);
   };
+
+  // 組織変更で選択中の社員が消えていたらモーダルは表示しない
+  const selectedAgent =
+    selected && office && selected in office.statuses ? selected : null;
 
   const cancelOrder = async (id: string) => {
     await fetch(`/api/orders/${id}`, { method: "DELETE" });
   };
 
   const orders = office?.orders ?? [];
-  const memberOptions = office
-    ? office.org.teams.flatMap((t) =>
-        t.members.map((m) => ({
-          agent: m.agent,
-          label: `${m.displayName}(${t.name})`,
-        })),
-      )
-    : [];
+  const workingCount = office
+    ? Object.values(office.statuses).filter((s) => s.state === "working").length
+    : 0;
+  const totalCost = orders.reduce((sum, o) => sum + (o.costUsd ?? 0), 0);
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -1029,35 +921,9 @@ export default function OfficeCanvas() {
         <h1 className="font-bold tracking-widest text-amber-100">
           ⌂ AGENT OFFICE
         </h1>
-        <form onSubmit={submitOrder} className="flex min-w-0 flex-1 gap-2">
-          <select
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-            className="rounded border border-amber-100/30 bg-[#241f30] px-2 py-1.5 text-amber-50 focus:outline-none"
-          >
-            <option value="orchestrator">
-              管理職{office ? `(${office.org.orchestrator.displayName})` : ""}に指示
-            </option>
-            {memberOptions.map((m) => (
-              <option key={m.agent} value={m.agent}>
-                {m.label}を直接指名
-              </option>
-            ))}
-          </select>
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="オーダーを入力(例: READMEの誤字を直してQAに確認させて)"
-            className="min-w-0 flex-1 rounded border border-amber-100/30 bg-white/5 px-3 py-1.5 text-amber-50 placeholder:text-amber-100/40 focus:border-amber-100/60 focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={sending || !text.trim()}
-            className="rounded bg-amber-200 px-4 py-1.5 font-bold text-[#1a1622] disabled:opacity-40"
-          >
-            {sending ? "送信中…" : "指示する"}
-          </button>
-        </form>
+        <p className="min-w-0 flex-1 truncate text-xs text-amber-100/40">
+          社員をクリックすると詳細と直接指示、右下のボタンから管理職への指示
+        </p>
         <nav className="flex items-center gap-2">
           <Link
             href="/employees"
@@ -1078,15 +944,35 @@ export default function OfficeCanvas() {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           <canvas
             ref={canvasRef}
-            className="block"
+            onClick={handleCanvasClick}
+            className="block cursor-pointer"
             style={{ imageRendering: "pixelated" }}
           />
+
+          {/* オーナー → 管理職への指示フォーム(トグル・DOMオーバーレイ) */}
+          <div className="absolute bottom-3 right-3 z-10">
+            {formOpen ? (
+              <OrchestratorForm
+                office={office}
+                onClose={() => setFormOpen(false)}
+              />
+            ) : (
+              <button
+                onClick={() => setFormOpen(true)}
+                className="rounded-full bg-amber-200 px-4 py-2 text-sm font-bold text-[#1a1622] shadow-lg hover:bg-amber-100"
+              >
+                📣 指示を出す
+              </button>
+            )}
+          </div>
         </div>
 
         <aside className="flex w-80 shrink-0 flex-col overflow-y-auto border-l border-white/10 p-3 text-sm">
+          <UsagePanel stats={stats} working={workingCount} totalCost={totalCost} />
+
           <h2 className="mb-2 text-xs tracking-widest text-amber-100/60">
             オーダー履歴
           </h2>
@@ -1115,9 +1001,9 @@ export default function OfficeCanvas() {
               <p className="text-xs leading-relaxed">
                 まだオーダーはありません。
                 <br />
-                上のフォームから管理職に指示を出すと
+                右下の「📣 指示を出す」から管理職に
                 <br />
-                チームが動き出します。
+                指示を出すとチームが動き出します。
               </p>
             </div>
           )}
@@ -1174,6 +1060,342 @@ export default function OfficeCanvas() {
             })}
           </ul>
         </aside>
+      </div>
+
+      {selectedAgent && office && (
+        <EmployeeModal
+          office={office}
+          agent={selectedAgent}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---- サイドバーの使用量パネル ----
+
+function UsagePanel({
+  stats,
+  working,
+  totalCost,
+}: {
+  stats: UsageStats | null;
+  working: number;
+  totalCost: number;
+}) {
+  const w5 = stats?.window5h ?? null;
+  const ratio = w5 && w5.peakTokens > 0 ? Math.min(1, w5.tokens / w5.peakTokens) : 0;
+  const barColor =
+    ratio > 0.85 ? "bg-rose-400" : ratio > 0.6 ? "bg-amber-300" : "bg-emerald-400";
+  return (
+    <section className="mb-4 rounded border border-emerald-900/80 bg-[#0c0e12] p-2.5 text-xs text-emerald-300">
+      <div className="mb-2 text-emerald-600">■ AI USAGE (ccusage)</div>
+      {w5 ? (
+        <>
+          <div className="flex items-center gap-2">
+            <span className="shrink-0">5h窓</span>
+            <div className="h-2.5 min-w-0 flex-1 rounded-sm border border-emerald-800 bg-black/40">
+              <div
+                className={`h-full rounded-sm ${barColor}`}
+                style={{ width: `${Math.round(ratio * 100)}%` }}
+              />
+            </div>
+            <span className="shrink-0">{fmtTokens(w5.tokens)}</span>
+          </div>
+          <div className="mt-0.5 text-emerald-700">
+            ピーク比{Math.round(ratio * 100)}% ≈${w5.cost.toFixed(2)}
+          </div>
+        </>
+      ) : (
+        <div className="text-emerald-700">5h窓 --</div>
+      )}
+      <div className="mt-1.5 flex justify-between">
+        <span>
+          今日 {stats?.today ? `${fmtTokens(stats.today.tokens)} ≈$${stats.today.cost.toFixed(2)}` : "--"}
+        </span>
+      </div>
+      <div className="flex justify-between">
+        <span>
+          今月 {stats?.month
+            ? `≈$${stats.month.total.toFixed(2)}${
+                stats.month.codex > 0.005
+                  ? ` (CL$${stats.month.claude.toFixed(0)}+CX$${stats.month.codex.toFixed(0)})`
+                  : ""
+              }`
+            : "--"}
+        </span>
+      </div>
+      <div className="mt-1.5 border-t border-emerald-900/60 pt-1.5">
+        稼働 {working}名  Σ${totalCost.toFixed(2)}
+      </div>
+    </section>
+  );
+}
+
+// ---- 右下のオーケストレータ指示フォーム ----
+
+function OrchestratorForm({
+  office,
+  onClose,
+}: {
+  office: OfficeState | null;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const managerName = office?.org.orchestrator.displayName ?? "管理職";
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!text.trim() || sending) return;
+    setSending(true);
+    try {
+      await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, target: "orchestrator" }),
+      });
+      setText("");
+      onClose();
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={submit}
+      className="w-80 rounded-lg border border-amber-100/30 bg-[#241f30]/95 p-3 text-sm shadow-xl backdrop-blur"
+    >
+      <div className="mb-2 flex items-center text-xs text-amber-100/70">
+        📣 管理職({managerName})へ指示
+        <button
+          type="button"
+          onClick={onClose}
+          className="ml-auto rounded px-1.5 text-amber-100/60 hover:bg-white/10"
+        >
+          ✕
+        </button>
+      </div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        autoFocus
+        placeholder="例: READMEの誤字を直して、QAに確認させて"
+        className="w-full rounded border border-amber-100/30 bg-white/5 px-2 py-1.5 text-amber-50 placeholder:text-amber-100/40 focus:border-amber-100/60 focus:outline-none"
+      />
+      <button
+        type="submit"
+        disabled={sending || !text.trim()}
+        className="mt-2 w-full rounded bg-amber-200 py-1.5 font-bold text-[#1a1622] disabled:opacity-40"
+      >
+        {sending ? "送信中…" : "指示する"}
+      </button>
+    </form>
+  );
+}
+
+// ---- 社員モーダル(クリックで開く) ----
+
+function EmployeeModal({
+  office,
+  agent,
+  onClose,
+}: {
+  office: OfficeState;
+  agent: string;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sentNote, setSentNote] = useState("");
+
+  const org = office.org;
+  const isOrchestrator = agent === org.orchestrator.agent;
+  const isHr = agent === org.hr.agent;
+
+  let displayName = "";
+  let role = "";
+  let teamName = "";
+  if (isOrchestrator) {
+    displayName = org.orchestrator.displayName;
+    role = "管理職(オーケストレータ)";
+  } else if (isHr) {
+    displayName = org.hr.displayName;
+    role = "人事(採用・チーム編成)";
+  } else {
+    for (const team of org.teams) {
+      const m = team.members.find((mm) => mm.agent === agent);
+      if (m) {
+        displayName = m.displayName;
+        role = m.role;
+        teamName = team.name;
+        break;
+      }
+    }
+  }
+  const description = org.agents[agent]?.description ?? "";
+  const status = office.statuses[agent];
+  const currentOrder = status?.orderId
+    ? office.orders.find((o) => o.id === status.orderId)
+    : undefined;
+  const relatedOrders = office.orders
+    .filter((o) =>
+      isOrchestrator ? o.target === "orchestrator" : o.target === agent,
+    )
+    .slice(0, 5);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!text.trim() || sending) return;
+    setSending(true);
+    try {
+      if (isHr) {
+        await fetch("/api/org/hr", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        setSentNote("編成の検討を依頼しました。提案が届いたら組織編成ページで承認できます。");
+      } else {
+        await fetch("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text,
+            target: isOrchestrator ? "orchestrator" : agent,
+          }),
+        });
+        setSentNote("指示を送りました。");
+      }
+      setText("");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const formLabel = isHr
+    ? "組織編成を相談する"
+    : isOrchestrator
+      ? "指示を出す(チームへの割り振りはお任せ)"
+      : "直接指示(この社員が単独で対応)";
+  const placeholder = isHr
+    ? "例: ECサイト案件が始まる。フロント重視の体制にしたい"
+    : isOrchestrator
+      ? "例: READMEの誤字を直して、QAに確認させて"
+      : "例: package.json を読んで依存関係を要約して";
+
+  return (
+    <div
+      className="fixed inset-0 z-20 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg border border-white/15 bg-[#241f30] p-4 text-sm shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-lg font-bold text-amber-50">{displayName}</span>
+          <span className="text-xs text-amber-100/60">
+            {role}
+            {teamName ? ` / ${teamName}` : ""}
+          </span>
+          <code className="rounded bg-black/40 px-1.5 py-0.5 text-xs text-amber-100/40">
+            {agent}
+          </code>
+          <button
+            onClick={onClose}
+            className="ml-auto rounded px-2 py-1 text-amber-100/60 hover:bg-white/10"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mt-3 rounded border border-white/10 bg-white/5 p-2">
+          <div className="text-xs text-amber-100/50">いまの状態</div>
+          {status?.state === "working" ? (
+            <div className="mt-1 text-sky-200">
+              {status.emoji} {status.detail || status.activity}
+            </div>
+          ) : (
+            <div className="mt-1 text-amber-100/70">☕ 休憩中</div>
+          )}
+          {currentOrder && (
+            <div className="mt-1 text-xs text-amber-100/60">
+              担当中: {currentOrder.text}
+            </div>
+          )}
+        </div>
+
+        {description && (
+          <div className="mt-2 rounded border border-white/10 bg-white/5 p-2">
+            <div className="text-xs text-amber-100/50">得意分野</div>
+            <p className="mt-1 text-xs leading-relaxed text-amber-100/80">
+              {description}
+            </p>
+          </div>
+        )}
+
+        {isHr && office.proposal && (
+          <div className="mt-2 rounded border border-amber-200/40 bg-amber-200/10 p-2 text-xs">
+            📋 編成提案が届いています —{" "}
+            <Link href="/org" className="text-sky-300 underline">
+              組織編成ページで確認・承認
+            </Link>
+          </div>
+        )}
+        {isHr && office.hrBusy && (
+          <div className="mt-2 text-xs text-sky-300">
+            🗂️ 編成案を検討中です…(完了すると組織編成ページに提案が届きます)
+          </div>
+        )}
+
+        {relatedOrders.length > 0 && (
+          <div className="mt-2 rounded border border-white/10 bg-white/5 p-2">
+            <div className="text-xs text-amber-100/50">最近のオーダー</div>
+            <ul className="mt-1 space-y-1">
+              {relatedOrders.map((o) => {
+                const badge = ORDER_BADGE[o.status];
+                return (
+                  <li key={o.id} className="flex items-start gap-2 text-xs">
+                    <span
+                      className={`shrink-0 rounded px-1 py-0.5 ${badge.className}`}
+                    >
+                      {badge.label}
+                    </span>
+                    <span className="min-w-0 text-amber-100/70">{o.text}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        <form onSubmit={submit} className="mt-3">
+          <div className="mb-1 text-xs text-amber-100/60">{formLabel}</div>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={3}
+            placeholder={placeholder}
+            className="w-full rounded border border-amber-100/30 bg-white/5 px-2 py-1.5 text-amber-50 placeholder:text-amber-100/40 focus:border-amber-100/60 focus:outline-none"
+            disabled={isHr && office.hrBusy}
+          />
+          <div className="mt-2 flex items-center gap-3">
+            <button
+              type="submit"
+              disabled={sending || !text.trim() || (isHr && office.hrBusy)}
+              className="rounded bg-amber-200 px-4 py-1.5 font-bold text-[#1a1622] disabled:opacity-40"
+            >
+              {sending ? "送信中…" : isHr ? "相談する" : "指示する"}
+            </button>
+            {sentNote && (
+              <span className="text-xs text-emerald-300">{sentNote}</span>
+            )}
+          </div>
+        </form>
       </div>
     </div>
   );
