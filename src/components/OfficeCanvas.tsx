@@ -102,6 +102,8 @@ interface Layout {
   zones: Zone[];
   /** 休憩室の立ち位置(待機中の社員はここにいる。席についてる=作業中) */
   breakSpots: Map<string, { x: number; y: number }>;
+  /** 休憩室のラグ範囲(気まぐれ行動のうろうろ範囲) */
+  breakRect: { x: number; y: number; w: number; h: number };
   /** キャンバスの論理サイズ(組織規模に応じて広がる) */
   w: number;
   h: number;
@@ -265,6 +267,7 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
     seats,
     zones,
     breakSpots,
+    breakRect: { x: breakX, y: breakY, w: breakW, h: breakH },
     w,
     h,
     door: { x: 40, y: h + 20 },
@@ -554,6 +557,12 @@ interface Actor {
   y: number;
   targetX: number;
   targetY: number;
+  /** 直前フレームの状態(作業⇔休憩の遷移検知用) */
+  mode?: "working" | "idle";
+  /** 次に気まぐれ行動を起こす時刻 */
+  idleUntil: number;
+  /** 休憩中の演出(☕💬🎵💤など) */
+  emote: { icon: string; until: number } | null;
 }
 
 const ORDER_BADGE: Record<
@@ -606,6 +615,8 @@ export default function OfficeCanvas() {
               y: natural.door.y,
               targetX: natural.door.x,
               targetY: natural.door.y,
+              idleUntil: 0,
+              emote: null,
             });
           }
         }
@@ -715,12 +726,75 @@ export default function OfficeCanvas() {
             officeState.statuses[actor.agent]?.state === "working";
           const seat = layout.seats.get(actor.agent);
           const spot = layout.breakSpots.get(actor.agent);
-          if (seat && (working || deskBound.has(actor.agent))) {
+
+          if (seat && working) {
             actor.targetX = seat.x;
             actor.targetY = seat.y + 12;
-          } else if (spot) {
-            actor.targetX = spot.x;
-            actor.targetY = spot.y;
+            if (actor.mode !== "working") {
+              actor.mode = "working";
+              actor.emote = null;
+            }
+            continue;
+          }
+
+          if (seat && deskBound.has(actor.agent)) {
+            // 常時着席組: 席は動かさず、たまに机上の小芝居だけ
+            actor.targetX = seat.x;
+            actor.targetY = seat.y + 12;
+            actor.mode = "idle";
+            if (t > actor.idleUntil) {
+              if (Math.random() < 0.5) {
+                actor.emote = {
+                  icon: Math.random() < 0.5 ? "☕" : "📋",
+                  until: t + 4000,
+                };
+              }
+              actor.idleUntil = t + 8000 + Math.random() * 10000;
+            }
+            continue;
+          }
+
+          // チーム社員の休憩: 気まぐれ行動
+          if (actor.mode !== "idle") {
+            actor.mode = "idle";
+            actor.emote = null;
+            if (spot) {
+              actor.targetX = spot.x;
+              actor.targetY = spot.y;
+            }
+            actor.idleUntil = t + 4000 + Math.random() * 6000;
+          } else if (t > actor.idleUntil) {
+            const rug = layout.breakRect;
+            const roll = Math.random();
+            if (roll < 0.35) {
+              // 休憩室内をぶらぶら
+              actor.targetX = rug.x + 14 + Math.random() * Math.max(1, rug.w - 48);
+              actor.targetY = rug.y + 28 + Math.random() * Math.max(1, rug.h - 36);
+            } else if (roll < 0.55) {
+              // コーヒーを淹れに行く
+              actor.targetX = layout.coffee.x - 16;
+              actor.targetY = layout.coffee.y + 4;
+              actor.emote = { icon: "☕", until: t + 6000 };
+            } else if (roll < 0.75) {
+              // 近くの同僚と立ち話
+              const others = [...actors.values()].filter(
+                (a) => a !== actor && a.mode === "idle" && !deskBound.has(a.agent),
+              );
+              if (others.length > 0) {
+                const buddy = others[Math.floor(Math.random() * others.length)];
+                actor.targetX = buddy.x + (actor.x < buddy.x ? -14 : 14);
+                actor.targetY = buddy.y;
+                actor.emote = { icon: "💬", until: t + 5000 };
+                buddy.emote = { icon: "💬", until: t + 5500 };
+              }
+            } else {
+              // その場でひと息
+              actor.emote = {
+                icon: Math.random() < 0.5 ? "🎵" : "💤",
+                until: t + 4000,
+              };
+            }
+            actor.idleUntil = t + 7000 + Math.random() * 9000;
           }
         }
       }
@@ -849,6 +923,28 @@ export default function OfficeCanvas() {
           ctx.fillStyle = "#c9bfa0";
           ctx.fillText(role, sx, labelY + fontPx + rolePx + 3);
           ctx.font = `${fontPx}px ${fontFamily}`;
+
+          // 休憩中の演出(☕💬🎵💤): 絵文字だけの小さな吹き出し
+          if (
+            status?.state !== "working" &&
+            actor.emote &&
+            t < actor.emote.until
+          ) {
+            const icon = actor.emote.icon;
+            const bw = ctx.measureText(icon).width + 10;
+            const bh = fontPx + 6;
+            const bx = sx;
+            const by = sy - 11 * scale - bh;
+            ctx.fillStyle = "rgba(255,255,255,0.85)";
+            ctx.beginPath();
+            ctx.roundRect(bx - bw / 2, by, bw, bh, 4);
+            ctx.fill();
+            ctx.strokeStyle = "#55556a";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = "#26262f";
+            ctx.fillText(icon, bx, by + fontPx + 1);
+          }
 
           if (status?.state === "working") {
             const bubbleText = `${status.emoji} ${truncate(
