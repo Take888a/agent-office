@@ -83,6 +83,7 @@ function hashCode(s: string): number {
 interface Seat {
   agent: string;
   displayName: string;
+  role: string;
   x: number; // デスク中心
   y: number;
 }
@@ -144,11 +145,11 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
     ZONE_PAD * 2 +
     8;
 
-  // 休憩室(上段右・コーヒーマシン付き): 全員収容を最大2行で。
-  // 上段の空きスペースを使い、キャンバスを下に伸ばさない
-  const headcount = 2 + teams.reduce((n, t) => n + t.members.length, 0);
+  // 休憩室(上段右・コーヒーマシン付き): チーム社員全員を最大2行で収容。
+  // 管理職と人事は常時着席のため休憩室を使わない
+  const headcount = teams.reduce((n, t) => n + t.members.length, 0);
   const breakRows = headcount <= 4 ? 1 : 2;
-  const breakPerRow = Math.ceil(headcount / breakRows);
+  const breakPerRow = Math.max(1, Math.ceil(headcount / breakRows));
   const breakW = breakPerRow * 26 + 56; // 右側にコーヒーマシンの場所を確保
   const breakH = breakRows * 30 + 28;
 
@@ -175,6 +176,7 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
   seats.set(org.hr.agent, {
     agent: org.hr.agent,
     displayName: org.hr.displayName,
+    role: "人事",
     x: 72,
     y: 96,
   });
@@ -183,6 +185,7 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
   seats.set(org.orchestrator.agent, {
     agent: org.orchestrator.agent,
     displayName: org.orchestrator.displayName,
+    role: "管理職",
     x: w / 2,
     y: 96,
   });
@@ -199,11 +202,7 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
     h: breakH,
   });
   const breakSpots = new Map<string, { x: number; y: number }>();
-  const everyone = [
-    org.orchestrator.agent,
-    org.hr.agent,
-    ...teams.flatMap((t) => t.members.map((m) => m.agent)),
-  ];
+  const everyone = teams.flatMap((t) => t.members.map((m) => m.agent));
   everyone.forEach((agent, i) => {
     const r = Math.floor(i / breakPerRow);
     const c = i % breakPerRow;
@@ -252,7 +251,13 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
       const seatsInRow = Math.min(perRow, team.members.length - r * perRow);
       const cx = rugX + rugW / 2 + (c - (seatsInRow - 1) / 2) * SEAT_W;
       const cy = rugY + ZONE_HEAD + r * SEAT_ROW_H;
-      seats.set(m.agent, { agent: m.agent, displayName: m.displayName, x: cx, y: cy });
+      seats.set(m.agent, {
+        agent: m.agent,
+        displayName: m.displayName,
+        role: m.role,
+        x: cx,
+        y: cy,
+      });
     });
   });
 
@@ -699,13 +704,18 @@ export default function OfficeCanvas() {
       }
 
       // --- 移動更新(作業中はデスクへ、待機中は休憩室へ) ---
+      // 管理職と人事はどんなプロジェクトにもいる常設ポジションなので常時着席
       if (layout && officeState) {
+        const deskBound = new Set([
+          officeState.org.orchestrator.agent,
+          officeState.org.hr.agent,
+        ]);
         for (const actor of actors.values()) {
           const working =
             officeState.statuses[actor.agent]?.state === "working";
           const seat = layout.seats.get(actor.agent);
           const spot = layout.breakSpots.get(actor.agent);
-          if (working && seat) {
+          if (seat && (working || deskBound.has(actor.agent))) {
             actor.targetX = seat.x;
             actor.targetY = seat.y + 12;
           } else if (spot) {
@@ -764,6 +774,12 @@ export default function OfficeCanvas() {
           } else if (status?.state === "working") {
             sprite =
               Math.floor(t / 350) % 2 === 0 ? SPRITE_BACK : SPRITE_BACK_TYPE;
+          } else if (
+            actor.agent === officeState.org.orchestrator.agent ||
+            actor.agent === officeState.org.hr.agent
+          ) {
+            // 管理職・人事は休憩中も自席に座っている
+            sprite = SPRITE_BACK;
           } else {
             // 休憩中: こちらを向いて立つ
             sprite = SPRITE_FRONT;
@@ -815,12 +831,24 @@ export default function OfficeCanvas() {
           if (!seat) continue;
           const sx = actor.x * scale;
           const sy = actor.y * scale;
+          // 名前+職種の2行ラベル
           const name = truncate(seat.displayName, 10);
+          const role = truncate(seat.role, 12);
+          const rolePx = Math.max(9, Math.round(fontPx * 0.85));
+          const nw =
+            Math.max(
+              ctx.measureText(name).width,
+              ctx.measureText(role).width * (rolePx / fontPx),
+            ) + 8;
+          const labelY = sy + 8 * scale;
           ctx.fillStyle = "rgba(20,20,30,0.75)";
-          const nw = ctx.measureText(name).width + 8;
-          ctx.fillRect(sx - nw / 2, sy + 8 * scale, nw, fontPx + 4);
+          ctx.fillRect(sx - nw / 2, labelY, nw, fontPx + rolePx + 7);
           ctx.fillStyle = "#f5f0e0";
-          ctx.fillText(name, sx, sy + 8 * scale + fontPx);
+          ctx.fillText(name, sx, labelY + fontPx);
+          ctx.font = `${rolePx}px ${fontFamily}`;
+          ctx.fillStyle = "#c9bfa0";
+          ctx.fillText(role, sx, labelY + fontPx + rolePx + 3);
+          ctx.font = `${fontPx}px ${fontFamily}`;
 
           if (status?.state === "working") {
             const bubbleText = `${status.emoji} ${truncate(
