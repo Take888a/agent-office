@@ -6,11 +6,11 @@ import type { OfficeState, OrderInfo } from "@/lib/office";
 import type { OrgView } from "@/lib/org";
 
 // ---- 論理解像度(ピクセルアート座標系) ----
-const W = 512;
-const H = 352;
+// 最小サイズ。組織が大きい場合は computeLayout がキャンバスを広げる
+// (画面には縮小フィットされるため、チーム数・人数が増えても崩れない)
+const MIN_W = 512;
+const MIN_H = 352;
 const WALL_H = 56;
-const COFFEE = { x: 468, y: 84 };
-const DOOR = { x: 40, y: H + 20 };
 
 // ---- キャラクターのドット絵 (10x14, 文字=パレットキー) ----
 const SPRITE_FRONT = [
@@ -99,11 +99,52 @@ interface Zone {
 interface Layout {
   seats: Map<string, Seat>;
   zones: Zone[];
+  /** キャンバスの論理サイズ(組織規模に応じて広がる) */
+  w: number;
+  h: number;
+  door: { x: number; y: number };
+  coffee: { x: number; y: number };
 }
+
+// デスク1席の占有サイズ(横58 x 縦68)とゾーン内の余白
+const SEAT_W = 58;
+const SEAT_ROW_H = 68;
+const ZONE_PAD = 6;
+const ZONE_HEAD = 40; // ラグ上端〜最初のデスク中心
+const ZONE_FOOT = 26; // 最後のデスク中心〜ラグ下端(椅子+名札ぶん)
 
 function computeLayout(org: OrgView): Layout {
   const seats = new Map<string, Seat>();
   const zones: Zone[] = [];
+  const teams = org.teams;
+
+  // 各チームが必要とするセルサイズ(デスクは詰めずに常に定間隔で並べる)
+  const perRowOf = (members: number) => Math.min(3, Math.max(1, members));
+  const cellW =
+    Math.max(90, ...teams.map((t) => perRowOf(t.members.length) * SEAT_W + 32)) +
+    ZONE_PAD * 2;
+  const cellH =
+    Math.max(
+      80,
+      ...teams.map(
+        (t) =>
+          ZONE_HEAD +
+          (Math.ceil(t.members.length / perRowOf(t.members.length)) - 1) *
+            SEAT_ROW_H +
+          ZONE_FOOT,
+      ),
+    ) +
+    ZONE_PAD * 2 +
+    8;
+
+  // グリッド形状: 正方形に近づける(横長キャンバスなので列をやや多めに)
+  const cols = Math.max(1, Math.ceil(Math.sqrt(teams.length)));
+  const rows = Math.max(1, Math.ceil(teams.length / cols));
+
+  const areaX = 16;
+  const areaY = 152;
+  const w = Math.max(MIN_W, areaX * 2 + cols * cellW);
+  const h = Math.max(MIN_H, areaY + rows * cellH + 16);
 
   // 上段: 人事(受付・左) と 管理職(中央)
   seats.set(org.hr.agent, {
@@ -117,60 +158,52 @@ function computeLayout(org: OrgView): Layout {
   seats.set(org.orchestrator.agent, {
     agent: org.orchestrator.agent,
     displayName: org.orchestrator.displayName,
-    x: W / 2,
+    x: w / 2,
     y: 96,
   });
-  zones.push({ name: "管理職", color: "#c9a227", x: W / 2 - 44, y: 72, w: 88, h: 66 });
+  zones.push({ name: "管理職", color: "#c9a227", x: w / 2 - 44, y: 72, w: 88, h: 66 });
 
-  // チームゾーン: 中央〜下段をグリッド分割(ラグの高さはデスク行数に合わせる)
-  const teams = org.teams;
-  if (teams.length > 0) {
-    const areaX = 16;
-    const areaW = W - 32;
-    const areaY = 152;
-    const areaH = 184;
-    const cols = teams.length <= 3 ? teams.length : Math.ceil(teams.length / 2);
-    const rows = Math.ceil(teams.length / cols);
-    const zoneW = areaW / cols;
-    const cellH = areaH / rows;
+  // チームゾーン: 最終行は中央寄せ
+  teams.forEach((team, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const inRow = row === rows - 1 ? teams.length - row * cols : cols;
+    const rowOffset = ((cols - inRow) * cellW) / 2;
+    const zx = areaX + rowOffset + col * cellW;
+    const zy = areaY + row * cellH;
 
-    teams.forEach((team, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const zx = areaX + col * zoneW;
-      const zy = areaY + row * cellH;
-      const pad = 6;
-
-      const perRow = Math.min(3, Math.max(1, Math.floor((zoneW - 24) / 58)));
-      const deskRows = Math.max(1, Math.ceil(team.members.length / perRow));
-      // 席は必ず自ゾーンのセル内に収める(行間隔を人数に応じて詰める)
-      const maxRugH = cellH - pad * 2;
-      const rowSpacing =
-        deskRows > 1
-          ? Math.min(68, (maxRugH - 40 - 26) / (deskRows - 1))
-          : 68;
-      const rugH = Math.min(maxRugH, 40 + (deskRows - 1) * rowSpacing + 26);
-      zones.push({
-        name: team.name,
-        color: team.color,
-        x: zx + pad,
-        y: zy + pad,
-        w: zoneW - pad * 2,
-        h: rugH,
-      });
-
-      team.members.forEach((m, j) => {
-        const r = Math.floor(j / perRow);
-        const c = j % perRow;
-        const inRow = Math.min(perRow, team.members.length - r * perRow);
-        const cx = zx + zoneW / 2 + (c - (inRow - 1) / 2) * 58;
-        const cy = zy + pad + 40 + r * rowSpacing;
-        seats.set(m.agent, { agent: m.agent, displayName: m.displayName, x: cx, y: cy });
-      });
+    const perRow = perRowOf(team.members.length);
+    const deskRows = Math.max(1, Math.ceil(team.members.length / perRow));
+    const rugW = Math.max(90, perRow * SEAT_W + 32);
+    const rugH = ZONE_HEAD + (deskRows - 1) * SEAT_ROW_H + ZONE_FOOT;
+    const rugX = zx + (cellW - rugW) / 2;
+    zones.push({
+      name: team.name,
+      color: team.color,
+      x: rugX,
+      y: zy + ZONE_PAD,
+      w: rugW,
+      h: rugH,
     });
-  }
 
-  return { seats, zones };
+    team.members.forEach((m, j) => {
+      const r = Math.floor(j / perRow);
+      const c = j % perRow;
+      const seatsInRow = Math.min(perRow, team.members.length - r * perRow);
+      const cx = rugX + rugW / 2 + (c - (seatsInRow - 1) / 2) * SEAT_W;
+      const cy = zy + ZONE_PAD + ZONE_HEAD + r * SEAT_ROW_H;
+      seats.set(m.agent, { agent: m.agent, displayName: m.displayName, x: cx, y: cy });
+    });
+  });
+
+  return {
+    seats,
+    zones,
+    w,
+    h,
+    door: { x: 40, y: h + 20 },
+    coffee: { x: w - 44, y: 84 },
+  };
 }
 
 // ---- 描画ヘルパー ----
@@ -193,10 +226,11 @@ function drawSprite(
   }
 }
 
-function drawOffice(ctx: CanvasRenderingContext2D, t: number, zones: Zone[]) {
+function drawOffice(ctx: CanvasRenderingContext2D, t: number, layout: Layout) {
+  const { w, h, zones, coffee, door } = layout;
   // 床
-  for (let ty = WALL_H; ty < H; ty += 16) {
-    for (let tx = 0; tx < W; tx += 16) {
+  for (let ty = WALL_H; ty < h; ty += 16) {
+    for (let tx = 0; tx < w; tx += 16) {
       ctx.fillStyle = ((tx + ty) / 16) % 2 === 0 ? "#c9a87c" : "#bf9d70";
       ctx.fillRect(tx, ty, 16, 16);
     }
@@ -213,12 +247,11 @@ function drawOffice(ctx: CanvasRenderingContext2D, t: number, zones: Zone[]) {
   }
   // 壁
   ctx.fillStyle = "#7a8a99";
-  ctx.fillRect(0, 0, W, WALL_H);
+  ctx.fillRect(0, 0, w, WALL_H);
   ctx.fillStyle = "#5f6d7a";
-  ctx.fillRect(0, WALL_H - 6, W, 6);
-  // 窓
-  for (let i = 0; i < 3; i++) {
-    const wx = 56 + i * 152;
+  ctx.fillRect(0, WALL_H - 6, w, 6);
+  // 窓(キャンバス幅に応じて繰り返す。右端は時計・コーヒー用に空ける)
+  for (let wx = 56; wx + 64 <= w - 96; wx += 152) {
     ctx.fillStyle = "#3a4a6b";
     ctx.fillRect(wx, 8, 64, 34);
     ctx.fillStyle = "#26334d";
@@ -233,9 +266,10 @@ function drawOffice(ctx: CanvasRenderingContext2D, t: number, zones: Zone[]) {
     ctx.fillRect(wx + 30, 8, 3, 34);
   }
   // 掛け時計
+  const clockX = w - 32;
   ctx.fillStyle = "#e8e4d8";
   ctx.beginPath();
-  ctx.arc(480, 24, 10, 0, Math.PI * 2);
+  ctx.arc(clockX, 24, 10, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = "#44444f";
   ctx.lineWidth = 2;
@@ -248,25 +282,25 @@ function drawOffice(ctx: CanvasRenderingContext2D, t: number, zones: Zone[]) {
   ctx.strokeStyle = "#44444f";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(480, 24);
-  ctx.lineTo(480 + Math.cos(mAng) * 8, 24 + Math.sin(mAng) * 8);
-  ctx.moveTo(480, 24);
-  ctx.lineTo(480 + Math.cos(hAng) * 5, 24 + Math.sin(hAng) * 5);
+  ctx.moveTo(clockX, 24);
+  ctx.lineTo(clockX + Math.cos(mAng) * 8, 24 + Math.sin(mAng) * 8);
+  ctx.moveTo(clockX, 24);
+  ctx.lineTo(clockX + Math.cos(hAng) * 5, 24 + Math.sin(hAng) * 5);
   ctx.stroke();
 
   // コーヒーマシン
   ctx.fillStyle = "#4a4a55";
-  ctx.fillRect(COFFEE.x - 10, COFFEE.y - 26, 24, 30);
+  ctx.fillRect(coffee.x - 10, coffee.y - 26, 24, 30);
   ctx.fillStyle = "#33333c";
-  ctx.fillRect(COFFEE.x - 7, COFFEE.y - 18, 18, 10);
+  ctx.fillRect(coffee.x - 7, coffee.y - 18, 18, 10);
   ctx.fillStyle = Math.floor(t / 500) % 2 === 0 ? "#e05555" : "#7a2f2f";
-  ctx.fillRect(COFFEE.x + 8, COFFEE.y - 23, 3, 3);
+  ctx.fillRect(coffee.x + 8, coffee.y - 23, 3, 3);
   ctx.fillStyle = "#e8e4d8";
-  ctx.fillRect(COFFEE.x - 2, COFFEE.y - 10, 8, 6);
+  ctx.fillRect(coffee.x - 2, coffee.y - 10, 8, 6);
 
   // 観葉植物(右下コーナー)
-  const px = W - 32;
-  const py = H - 40;
+  const px = w - 32;
+  const py = h - 40;
   ctx.fillStyle = "#a05a2b";
   ctx.fillRect(px, py + 14, 16, 10);
   ctx.fillStyle = "#7a4420";
@@ -280,7 +314,7 @@ function drawOffice(ctx: CanvasRenderingContext2D, t: number, zones: Zone[]) {
 
   // 入口ドアマット
   ctx.fillStyle = "#8a6a4a";
-  ctx.fillRect(DOOR.x - 16, H - 8, 32, 8);
+  ctx.fillRect(door.x - 16, h - 8, 32, 8);
 }
 
 function drawDesk(
@@ -488,17 +522,18 @@ export default function OfficeCanvas() {
       try {
         const s = JSON.parse(ev.data) as OfficeState;
         stateRef.current = s;
-        layoutRef.current = computeLayout(s.org);
+        const layout = computeLayout(s.org);
+        layoutRef.current = layout;
         // 座席が変わった/新入社員はドアから出勤
         const actors = actorsRef.current;
-        const seats = layoutRef.current.seats;
+        const seats = layout.seats;
         for (const [agent, seat] of seats) {
           const actor = actors.get(agent);
           if (!actor) {
             actors.set(agent, {
               agent,
-              x: DOOR.x,
-              y: DOOR.y,
+              x: layout.door.x,
+              y: layout.door.y,
               targetX: seat.x,
               targetY: seat.y + 12,
             });
@@ -545,8 +580,8 @@ export default function OfficeCanvas() {
     if (!ctx) return;
 
     const scene = document.createElement("canvas");
-    scene.width = W;
-    scene.height = H;
+    scene.width = MIN_W;
+    scene.height = MIN_H;
     const sctx = scene.getContext("2d")!;
 
     let raf = 0;
@@ -559,10 +594,22 @@ export default function OfficeCanvas() {
       const dt = Math.min(2000, t - last);
       last = t;
 
+      const officeState = stateRef.current;
+      const layout = layoutRef.current;
+      const actors = actorsRef.current;
+
+      // 論理サイズは組織規模で変わる(未受信時は最小サイズ)
+      const lw = layout?.w ?? MIN_W;
+      const lh = layout?.h ?? MIN_H;
+      if (scene.width !== lw || scene.height !== lh) {
+        scene.width = lw;
+        scene.height = lh;
+      }
+
       const parent = canvas.parentElement!;
-      const scale = Math.min(parent.clientWidth / W, parent.clientHeight / H);
-      const cw = Math.floor(W * scale);
-      const ch = Math.floor(H * scale);
+      const scale = Math.min(parent.clientWidth / lw, parent.clientHeight / lh);
+      const cw = Math.floor(lw * scale);
+      const ch = Math.floor(lh * scale);
       const dpr = window.devicePixelRatio || 1;
       if (canvas.width !== cw * dpr || canvas.height !== ch * dpr) {
         canvas.width = cw * dpr;
@@ -570,10 +617,6 @@ export default function OfficeCanvas() {
         canvas.style.width = `${cw}px`;
         canvas.style.height = `${ch}px`;
       }
-
-      const officeState = stateRef.current;
-      const layout = layoutRef.current;
-      const actors = actorsRef.current;
 
       // --- 移動更新(出勤・席替え) ---
       for (const actor of actors.values()) {
@@ -591,7 +634,12 @@ export default function OfficeCanvas() {
       }
 
       // --- シーン描画(論理解像度) ---
-      drawOffice(sctx, t, layout?.zones ?? []);
+      if (layout) {
+        drawOffice(sctx, t, layout);
+      } else {
+        sctx.fillStyle = "#bf9d70";
+        sctx.fillRect(0, 0, lw, lh);
+      }
 
       if (layout && officeState) {
         const sortedSeats = [...layout.seats.values()].sort((a, b) => a.y - b.y);

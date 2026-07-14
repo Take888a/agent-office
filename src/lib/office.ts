@@ -65,7 +65,6 @@ interface InternalState {
   hrHandle: Query | null;
   proposal: ProposalInfo | null;
   listeners: Set<() => void>;
-  orgCache: OrgView | null;
 }
 
 // next dev の HMR でモジュールが再評価されても状態が消えないよう globalThis に保持
@@ -78,7 +77,6 @@ const state: InternalState = (g.__officeStateV2 ??= {
   hrHandle: null,
   proposal: null,
   listeners: new Set(),
-  orgCache: null,
 });
 
 function notify() {
@@ -91,8 +89,8 @@ export function subscribe(listener: () => void): () => void {
 }
 
 export async function getOfficeState(): Promise<OfficeState> {
-  if (!state.orgCache) state.orgCache = await loadOrgView();
-  const org = state.orgCache;
+  // org.json / .claude/agents は手で編集しても反映されるよう毎回読む(小さいファイル群)
+  const org = await loadOrgView();
   const statuses: Record<string, MemberStatus> = {};
   for (const m of allMembers(org)) {
     statuses[m.agent] = state.statuses.get(m.agent) ?? {
@@ -114,8 +112,7 @@ export async function getOfficeState(): Promise<OfficeState> {
   };
 }
 
-export function invalidateOrgCache() {
-  state.orgCache = null;
+export function notifyOrgChanged() {
   notify();
 }
 
@@ -206,7 +203,7 @@ async function buildOrchestratorPrompt(org: OrgView, orderText: string): Promise
 }
 
 export async function submitOrder(text: string, target?: string): Promise<OrderInfo> {
-  const org = state.orgCache ?? (state.orgCache = await loadOrgView());
+  const org = await loadOrgView();
   const isDirect = !!target && target !== "orchestrator";
   const targetAgent = isDirect ? target : org.orchestrator.agent;
   const member = allMembers(org).find((m) => m.agent === targetAgent);
@@ -422,7 +419,7 @@ function buildHrPrompt(org: OrgView, request: string): string {
 
 export async function submitHrOrder(request: string): Promise<void> {
   if (state.hrBusy) throw new Error("人事担当は対応中です");
-  const org = state.orgCache ?? (state.orgCache = await loadOrgView());
+  const org = await loadOrgView();
   const hrAgent = org.hr.agent;
   state.hrBusy = true;
   state.proposal = null;
@@ -488,7 +485,7 @@ export async function approveProposal(): Promise<void> {
   if (!proposal) throw new Error("承認待ちの提案がありません");
   await applyOrg(proposal.org, proposal.agents);
   state.proposal = null;
-  invalidateOrgCache();
+  notifyOrgChanged();
 }
 
 export function rejectProposal(): void {
