@@ -100,9 +100,7 @@ interface Zone {
 interface Layout {
   seats: Map<string, Seat>;
   zones: Zone[];
-  /** 休憩室の立ち位置(待機中の社員はここにいる。席についてる=作業中) */
-  breakSpots: Map<string, { x: number; y: number }>;
-  /** 休憩室のラグ範囲(気まぐれ行動のうろうろ範囲) */
+  /** 休憩コーナーのラグ範囲(コーヒーマシンの置き場所) */
   breakRect: { x: number; y: number; w: number; h: number };
   /** キャンバスの論理サイズ(組織規模に応じて広がる) */
   w: number;
@@ -147,13 +145,10 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
     ZONE_PAD * 2 +
     8;
 
-  // 休憩室(上段右・コーヒーマシン付き): チーム社員全員を最大2行で収容。
-  // 管理職と人事は常時着席のため休憩室を使わない
-  const headcount = teams.reduce((n, t) => n + t.members.length, 0);
-  const breakRows = headcount <= 4 ? 1 : 2;
-  const breakPerRow = Math.max(1, Math.ceil(headcount / breakRows));
-  const breakW = breakPerRow * 26 + 56; // 右側にコーヒーマシンの場所を確保
-  const breakH = breakRows * 30 + 28;
+  // 休憩コーナー(上段右): コーヒーマシンの置き場所。
+  // 待機中の社員はオフィス中を自由に歩き回るので、ここは小さな固定サイズでよい
+  const breakW = 110;
+  const breakH = 62;
 
   // グリッド列数: 使い勝手のよい幅(チーム3列ぶん)に収まるなら横に並べ、
   // 超える規模では正方形に近いグリッドにする
@@ -202,16 +197,6 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
     y: breakY,
     w: breakW,
     h: breakH,
-  });
-  const breakSpots = new Map<string, { x: number; y: number }>();
-  const everyone = teams.flatMap((t) => t.members.map((m) => m.agent));
-  everyone.forEach((agent, i) => {
-    const r = Math.floor(i / breakPerRow);
-    const c = i % breakPerRow;
-    breakSpots.set(agent, {
-      x: breakX + 18 + c * 26,
-      y: breakY + 32 + r * 30,
-    });
   });
 
   // チーム領域は上段(人事/管理職/休憩室の下端)の直下から
@@ -266,12 +251,32 @@ function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout 
   return {
     seats,
     zones,
-    breakSpots,
     breakRect: { x: breakX, y: breakY, w: breakW, h: breakH },
     w,
     h,
     door: { x: 40, y: h + 20 },
     coffee: { x: breakX + breakW - 20, y: breakY + 42 },
+  };
+}
+
+/** オフィス内のうろつき先をランダムに選ぶ(デスク周りは避ける) */
+function pickWanderSpot(layout: Layout): { x: number; y: number } {
+  for (let i = 0; i < 12; i++) {
+    const x = 24 + Math.random() * (layout.w - 48);
+    const y = WALL_H + 34 + Math.random() * (layout.h - WALL_H - 56);
+    let clear = true;
+    for (const seat of layout.seats.values()) {
+      if (Math.abs(x - seat.x) < 36 && y > seat.y - 28 && y < seat.y + 32) {
+        clear = false;
+        break;
+      }
+    }
+    if (clear) return { x, y };
+  }
+  // 空きが見つからなければ休憩コーナーへ
+  return {
+    x: layout.breakRect.x + layout.breakRect.w / 2 - 10,
+    y: layout.breakRect.y + layout.breakRect.h - 14,
   };
 }
 
@@ -714,7 +719,7 @@ export default function OfficeCanvas() {
         canvas.style.height = `${ch}px`;
       }
 
-      // --- 移動更新(作業中はデスクへ、待機中は休憩室へ) ---
+      // --- 移動更新(作業中はデスクへ、待機中はオフィス内を自由に) ---
       // 管理職と人事はどんなプロジェクトにもいる常設ポジションなので常時着席
       if (layout && officeState) {
         const deskBound = new Set([
@@ -725,7 +730,6 @@ export default function OfficeCanvas() {
           const working =
             officeState.statuses[actor.agent]?.state === "working";
           const seat = layout.seats.get(actor.agent);
-          const spot = layout.breakSpots.get(actor.agent);
 
           if (seat && working) {
             actor.targetX = seat.x;
@@ -754,22 +758,21 @@ export default function OfficeCanvas() {
             continue;
           }
 
-          // チーム社員の休憩: 気まぐれ行動
+          // チーム社員の休憩: オフィス内を自由に歩き回る
           if (actor.mode !== "idle") {
             actor.mode = "idle";
             actor.emote = null;
-            if (spot) {
-              actor.targetX = spot.x;
-              actor.targetY = spot.y;
-            }
+            const first = pickWanderSpot(layout);
+            actor.targetX = first.x;
+            actor.targetY = first.y;
             actor.idleUntil = t + 4000 + Math.random() * 6000;
           } else if (t > actor.idleUntil) {
-            const rug = layout.breakRect;
             const roll = Math.random();
             if (roll < 0.35) {
-              // 休憩室内をぶらぶら
-              actor.targetX = rug.x + 14 + Math.random() * Math.max(1, rug.w - 48);
-              actor.targetY = rug.y + 28 + Math.random() * Math.max(1, rug.h - 36);
+              // オフィス内をぶらぶら
+              const next = pickWanderSpot(layout);
+              actor.targetX = next.x;
+              actor.targetY = next.y;
             } else if (roll < 0.55) {
               // コーヒーを淹れに行く
               actor.targetX = layout.coffee.x - 16;
