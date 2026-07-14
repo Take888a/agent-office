@@ -81,16 +81,25 @@ export interface AgentDef {
   prompt: string;
 }
 
+/** 社員定義(.claude/agents/<name>.md)を書き込む */
+export async function writeAgentDef(
+  name: string,
+  description: string,
+  prompt: string,
+): Promise<void> {
+  if (!/^[a-z0-9-]+$/.test(name)) {
+    throw new Error(`invalid agent name: ${name}`);
+  }
+  await fs.mkdir(AGENTS_DIR, { recursive: true });
+  const body = `---\nname: ${name}\ndescription: ${description.replace(/\n/g, " ")}\n---\n\n${prompt.trim()}\n`;
+  await fs.writeFile(agentFilePath(name), body, "utf8");
+}
+
 export async function applyOrg(org: OrgConfig, agents: AgentDef[]): Promise<void> {
   const oldOrg = await loadOrgConfig().catch(() => null);
 
-  await fs.mkdir(AGENTS_DIR, { recursive: true });
   for (const a of agents) {
-    if (!/^[a-z0-9-]+$/.test(a.name)) {
-      throw new Error(`invalid agent name: ${a.name}`);
-    }
-    const body = `---\nname: ${a.name}\ndescription: ${a.description.replace(/\n/g, " ")}\n---\n\n${a.prompt.trim()}\n`;
-    await fs.writeFile(agentFilePath(a.name), body, "utf8");
+    await writeAgentDef(a.name, a.description, a.prompt);
   }
 
   await fs.mkdir(path.dirname(ORG_PATH), { recursive: true });

@@ -429,7 +429,12 @@ function truncate(s: string, n: number): string {
 
 interface UsageStats {
   available: boolean;
-  window5h: { tokens: number; cost: number; peakTokens: number } | null;
+  window5h: {
+    tokens: number;
+    cost: number;
+    peakTokens: number;
+    resetsAt: number | null;
+  } | null;
   today: { tokens: number; cost: number } | null;
   month: { total: number; claude: number; codex: number; tokens: number } | null;
 }
@@ -475,6 +480,8 @@ export default function OfficeCanvas() {
   const layoutRef = useRef<Layout | null>(null);
   const layoutKeyRef = useRef("");
   const actorsRef = useRef<Map<string, Actor>>(new Map());
+  /** 初回スナップショット受信済みか(初回は定位置スタート、以降の新入社員はドアから) */
+  const initializedRef = useRef(false);
   /** クリック位置→論理座標変換用に現在のスケールを保持 */
   const scaleRef = useRef(1);
 
@@ -499,11 +506,36 @@ export default function OfficeCanvas() {
         const natural = computeLayout(s.org);
         naturalRef.current = natural;
         layoutKeyRef.current = ""; // 表示用レイアウトを次フレームで再計算
-        // 新入社員はドアから出勤(行き先は描画ループが状態に応じて決める)
+        // 初回ロードは定位置スタート(管理職・人事は着席、他は休憩コーナー)。
+        // 以降に組織へ追加された社員だけドアから出勤する
         const actors = actorsRef.current;
         const seats = natural.seats;
+        const isFirstSnapshot = !initializedRef.current;
         for (const agent of seats.keys()) {
-          if (!actors.has(agent)) {
+          if (actors.has(agent)) continue;
+          if (isFirstSnapshot) {
+            const deskBound =
+              agent === s.org.orchestrator.agent || agent === s.org.hr.agent;
+            const seat = seats.get(agent)!;
+            const rect = natural.breakRect;
+            const pos = deskBound
+              ? { x: seat.x, y: seat.y + 12 }
+              : {
+                  x: rect.x + 14 + Math.random() * Math.max(1, rect.w - 44),
+                  y: rect.y + 30 + Math.random() * Math.max(1, rect.h - 34),
+                };
+            actors.set(agent, {
+              agent,
+              x: pos.x,
+              y: pos.y,
+              targetX: pos.x,
+              targetY: pos.y,
+              mode: "idle",
+              // 休憩コーナーで一息ついてから時間差でうろつき始める
+              idleUntil: performance.now() + 2000 + Math.random() * 8000,
+              emote: null,
+            });
+          } else {
             actors.set(agent, {
               agent,
               x: natural.door.x,
@@ -515,6 +547,7 @@ export default function OfficeCanvas() {
             });
           }
         }
+        initializedRef.current = true;
         for (const agent of [...actors.keys()]) {
           if (!seats.has(agent)) actors.delete(agent);
         }
@@ -1086,49 +1119,76 @@ function UsagePanel({
 }) {
   const w5 = stats?.window5h ?? null;
   const ratio = w5 && w5.peakTokens > 0 ? Math.min(1, w5.tokens / w5.peakTokens) : 0;
+  const pct = Math.round(ratio * 100);
   const barColor =
     ratio > 0.85 ? "bg-rose-400" : ratio > 0.6 ? "bg-amber-300" : "bg-emerald-400";
   return (
-    <section className="mb-4 rounded border border-emerald-900/80 bg-[#0c0e12] p-2.5 text-xs text-emerald-300">
-      <div className="mb-2 text-emerald-600">■ AI USAGE (ccusage)</div>
-      {w5 ? (
-        <>
-          <div className="flex items-center gap-2">
-            <span className="shrink-0">5h窓</span>
-            <div className="h-2.5 min-w-0 flex-1 rounded-sm border border-emerald-800 bg-black/40">
-              <div
-                className={`h-full rounded-sm ${barColor}`}
-                style={{ width: `${Math.round(ratio * 100)}%` }}
-              />
-            </div>
-            <span className="shrink-0">{fmtTokens(w5.tokens)}</span>
+    <section className="mb-4">
+      <h2 className="mb-2 text-xs tracking-widest text-amber-100/60">
+        AI 使用量
+      </h2>
+
+      {/* 5時間レート制限ウィンドウ */}
+      <div className="rounded border border-white/10 bg-white/5 p-2.5">
+        <div className="flex items-baseline justify-between text-xs text-amber-100/50">
+          <span>5時間ウィンドウ</span>
+          <span>
+            {w5?.resetsAt
+              ? `リセット ${new Date(w5.resetsAt).toLocaleTimeString("ja-JP", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}`
+              : "--"}
+          </span>
+        </div>
+        <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-black/40">
+          <div
+            className={`h-full rounded-full transition-[width] duration-700 ${barColor}`}
+            style={{ width: `${w5 ? Math.max(2, pct) : 0}%` }}
+          />
+        </div>
+        <div className="mt-1.5 flex items-baseline justify-between">
+          <span className="font-bold text-amber-50">
+            {w5 ? fmtTokens(w5.tokens) : "--"}
+            <span className="ml-1 text-xs font-normal text-amber-100/40">
+              tokens
+            </span>
+          </span>
+          <span className="text-xs text-amber-100/50">
+            {w5 ? `ピーク比 ${pct}% ・ ≈$${w5.cost.toFixed(2)}` : ""}
+          </span>
+        </div>
+      </div>
+
+      {/* 今日 / 今月 */}
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <div className="rounded border border-white/10 bg-white/5 p-2.5">
+          <div className="text-xs text-amber-100/50">今日</div>
+          <div className="mt-0.5 text-lg font-bold text-amber-50">
+            {stats?.today ? `$${stats.today.cost.toFixed(2)}` : "--"}
           </div>
-          <div className="mt-0.5 text-emerald-700">
-            ピーク比{Math.round(ratio * 100)}% ≈${w5.cost.toFixed(2)}
+          <div className="text-xs text-amber-100/40">
+            {stats?.today ? `${fmtTokens(stats.today.tokens)} tokens` : ""}
           </div>
-        </>
-      ) : (
-        <div className="text-emerald-700">5h窓 --</div>
-      )}
-      <div className="mt-1.5 flex justify-between">
-        <span>
-          今日 {stats?.today ? `${fmtTokens(stats.today.tokens)} ≈$${stats.today.cost.toFixed(2)}` : "--"}
-        </span>
+        </div>
+        <div className="rounded border border-white/10 bg-white/5 p-2.5">
+          <div className="text-xs text-amber-100/50">今月試算</div>
+          <div className="mt-0.5 text-lg font-bold text-amber-50">
+            {stats?.month
+              ? `$${Math.round(stats.month.total).toLocaleString()}`
+              : "--"}
+          </div>
+          <div className="text-xs text-amber-100/40">
+            {stats?.month && stats.month.codex > 0.005
+              ? `CL $${stats.month.claude.toFixed(0)} + CX $${stats.month.codex.toFixed(0)}`
+              : "API単価換算"}
+          </div>
+        </div>
       </div>
-      <div className="flex justify-between">
-        <span>
-          今月 {stats?.month
-            ? `≈$${stats.month.total.toFixed(2)}${
-                stats.month.codex > 0.005
-                  ? ` (CL$${stats.month.claude.toFixed(0)}+CX$${stats.month.codex.toFixed(0)})`
-                  : ""
-              }`
-            : "--"}
-        </span>
-      </div>
-      <div className="mt-1.5 border-t border-emerald-900/60 pt-1.5">
-        稼働 {working}名  Σ${totalCost.toFixed(2)}
-      </div>
+
+      <p className="mt-1.5 text-right text-xs text-amber-100/40">
+        稼働 {working}名 ・ オーダー累計 ${totalCost.toFixed(2)}
+      </p>
     </section>
   );
 }
@@ -1211,6 +1271,15 @@ function EmployeeModal({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [sentNote, setSentNote] = useState("");
+  // 定義ファイル編集(開いた時点の内容で初期化。保存で .claude/agents/*.md に反映)
+  const [defDescription, setDefDescription] = useState(
+    office.org.agents[agent]?.description ?? "",
+  );
+  const [defPrompt, setDefPrompt] = useState(
+    office.org.agents[agent]?.prompt ?? "",
+  );
+  const [savingDef, setSavingDef] = useState(false);
+  const [defNote, setDefNote] = useState("");
 
   const org = office.org;
   const isOrchestrator = agent === org.orchestrator.agent;
@@ -1337,6 +1406,67 @@ function EmployeeModal({
             </p>
           </div>
         )}
+
+        <details className="mt-2 rounded border border-white/10 bg-white/5 p-2">
+          <summary className="cursor-pointer text-xs text-amber-100/50 hover:text-amber-100/80">
+            📝 定義ファイルを確認・編集(.claude/agents/{agent}.md)
+          </summary>
+          <div className="mt-2 space-y-2">
+            <div>
+              <div className="mb-1 text-xs text-amber-100/50">
+                description(管理職が委譲判断に使う説明)
+              </div>
+              <input
+                value={defDescription}
+                onChange={(e) => setDefDescription(e.target.value)}
+                className="w-full rounded border border-amber-100/30 bg-white/5 px-2 py-1.5 text-xs text-amber-50 focus:border-amber-100/60 focus:outline-none"
+              />
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-amber-100/50">
+                プロンプト(本文)
+              </div>
+              <textarea
+                value={defPrompt}
+                onChange={(e) => setDefPrompt(e.target.value)}
+                rows={8}
+                className="w-full rounded border border-amber-100/30 bg-black/40 px-2 py-1.5 font-mono text-xs leading-relaxed text-amber-50 focus:border-amber-100/60 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={async () => {
+                  if (savingDef) return;
+                  setSavingDef(true);
+                  setDefNote("");
+                  try {
+                    const res = await fetch(`/api/org/agents/${agent}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        description: defDescription,
+                        prompt: defPrompt,
+                      }),
+                    });
+                    setDefNote(
+                      res.ok ? "保存しました" : "保存に失敗しました",
+                    );
+                  } finally {
+                    setSavingDef(false);
+                  }
+                }}
+                disabled={savingDef}
+                className="rounded border border-amber-100/40 px-3 py-1 text-xs text-amber-100 hover:bg-white/10 disabled:opacity-40"
+              >
+                {savingDef ? "保存中…" : "定義を保存"}
+              </button>
+              {defNote && (
+                <span className="text-xs text-emerald-300">{defNote}</span>
+              )}
+            </div>
+          </div>
+        </details>
 
         {isHr && office.proposal && (
           <div className="mt-2 rounded border border-amber-200/40 bg-amber-200/10 p-2 text-xs">

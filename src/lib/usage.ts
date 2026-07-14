@@ -15,8 +15,16 @@ const [CC_CMD, ...CC_BASE_ARGS] = (
 
 export interface UsageStats {
   available: boolean;
-  /** 現在の5時間レート制限ウィンドウ。peakTokens は直近7日の最大ブロック(バーの分母) */
-  window5h: { tokens: number; cost: number; peakTokens: number } | null;
+  /**
+   * 現在の5時間レート制限ウィンドウ。peakTokens は直近7日の最大ブロック(バーの分母)。
+   * resetsAt はウィンドウのリセット時刻(epoch ms)。アクティブなブロックがなければ null
+   */
+  window5h: {
+    tokens: number;
+    cost: number;
+    peakTokens: number;
+    resetsAt: number | null;
+  } | null;
   today: { tokens: number; cost: number } | null;
   /** 今月のコスト試算(USD)。claude/codex はモデル名で振り分け */
   month: { total: number; claude: number; codex: number; tokens: number } | null;
@@ -27,6 +35,7 @@ const CACHE_MS = 60_000;
 
 interface CcBlock {
   startTime?: string;
+  endTime?: string;
   isActive?: boolean;
   isGap?: boolean;
   totalTokens?: number;
@@ -104,10 +113,12 @@ async function fetchWindow5h(): Promise<UsageStats["window5h"]> {
       peakTokens = Math.max(peakTokens, effectiveBlockTokens(b));
     }
   }
+  const resetsAt = active?.endTime ? Date.parse(active.endTime) : NaN;
   return {
     tokens: active ? effectiveBlockTokens(active) : 0,
     cost: active?.costUSD ?? 0,
     peakTokens,
+    resetsAt: Number.isNaN(resetsAt) ? null : resetsAt,
   };
 }
 
