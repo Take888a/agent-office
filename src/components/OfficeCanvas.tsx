@@ -115,7 +115,12 @@ const ZONE_PAD = 6;
 const ZONE_HEAD = 40; // ラグ上端〜最初のデスク中心
 const ZONE_FOOT = 26; // 最後のデスク中心〜ラグ下端(椅子+名札ぶん)
 
-function computeLayout(org: OrgView): Layout {
+/**
+ * 組織からオフィスレイアウトを計算する。
+ * target を渡すと、その論理サイズいっぱいに要素を配り直す
+ * (画面アスペクト比に合わせてレターボックスを作らないため)。
+ */
+function computeLayout(org: OrgView, target?: { w: number; h: number }): Layout {
   const seats = new Map<string, Seat>();
   const zones: Zone[] = [];
   const teams = org.teams;
@@ -162,8 +167,8 @@ function computeLayout(org: OrgView): Layout {
   // チームグリッド幅 と 上段(管理職を中心に置いた上で休憩室が入る幅) の大きい方
   const wTeams = areaX * 2 + cols * cellW;
   const wTop = 2 * (breakW + 68);
-  const w = Math.max(320, wTeams, wTop);
-  // 端数の余り幅はセルへ均等配分(ゾーンが全幅に広がる)
+  const w = Math.max(320, wTeams, wTop, target?.w ?? 0);
+  // 余り幅はセルへ均等配分(ゾーンが全幅に広がる)
   const effCellW = (w - areaX * 2) / cols;
 
   // 上段: 人事(左)・管理職(中央)・休憩室(右)
@@ -211,25 +216,32 @@ function computeLayout(org: OrgView): Layout {
   // チーム領域は上段(人事/管理職/休憩室の下端)の直下から
   const areaY = Math.max(146, breakY + breakH + 10);
 
-  // チームゾーン: 最終行は中央寄せ
+  // 高さもコンテンツから算出。target 指定時は余り高さをセルへ均等配分
+  const hNat = areaY + rows * cellH + 14;
+  const h = Math.max(hNat, target?.h ?? 0);
+  const effCellH =
+    rows > 0 ? cellH + (h - hNat) / rows : cellH;
+
+  // チームゾーン: 最終行は中央寄せ、ラグはセル内で中央寄せ
   teams.forEach((team, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
     const inRow = row === rows - 1 ? teams.length - row * cols : cols;
     const rowOffset = ((cols - inRow) * effCellW) / 2;
     const zx = areaX + rowOffset + col * effCellW;
-    const zy = areaY + row * cellH;
+    const zy = areaY + row * effCellH;
 
     const perRow = perRowOf(team.members.length);
     const deskRows = Math.max(1, Math.ceil(team.members.length / perRow));
     const rugW = Math.max(90, perRow * SEAT_W + 32);
     const rugH = ZONE_HEAD + (deskRows - 1) * SEAT_ROW_H + ZONE_FOOT;
     const rugX = zx + (effCellW - rugW) / 2;
+    const rugY = zy + Math.max(ZONE_PAD, (effCellH - rugH) / 2);
     zones.push({
       name: team.name,
       color: team.color,
       x: rugX,
-      y: zy + ZONE_PAD,
+      y: rugY,
       w: rugW,
       h: rugH,
     });
@@ -239,13 +251,10 @@ function computeLayout(org: OrgView): Layout {
       const c = j % perRow;
       const seatsInRow = Math.min(perRow, team.members.length - r * perRow);
       const cx = rugX + rugW / 2 + (c - (seatsInRow - 1) / 2) * SEAT_W;
-      const cy = zy + ZONE_PAD + ZONE_HEAD + r * SEAT_ROW_H;
+      const cy = rugY + ZONE_HEAD + r * SEAT_ROW_H;
       seats.set(m.agent, { agent: m.agent, displayName: m.displayName, x: cx, y: cy });
     });
   });
-
-  // 高さもコンテンツから算出
-  const h = areaY + rows * cellH + 14;
 
   return {
     seats,
@@ -554,7 +563,11 @@ const ORDER_BADGE: Record<
 export default function OfficeCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<OfficeState | null>(null);
+  /** コンテンツ由来の自然サイズのレイアウト(スケール計算の基準) */
+  const naturalRef = useRef<Layout | null>(null);
+  /** 画面サイズに合わせて引き延ばした表示用レイアウト */
   const layoutRef = useRef<Layout | null>(null);
+  const layoutKeyRef = useRef("");
   const actorsRef = useRef<Map<string, Actor>>(new Map());
   const statsRef = useRef<UsageStats | null>(null);
 
@@ -574,19 +587,20 @@ export default function OfficeCanvas() {
       try {
         const s = JSON.parse(ev.data) as OfficeState;
         stateRef.current = s;
-        const layout = computeLayout(s.org);
-        layoutRef.current = layout;
+        const natural = computeLayout(s.org);
+        naturalRef.current = natural;
+        layoutKeyRef.current = ""; // 表示用レイアウトを次フレームで再計算
         // 新入社員はドアから出勤(行き先は描画ループが状態に応じて決める)
         const actors = actorsRef.current;
-        const seats = layout.seats;
+        const seats = natural.seats;
         for (const agent of seats.keys()) {
           if (!actors.has(agent)) {
             actors.set(agent, {
               agent,
-              x: layout.door.x,
-              y: layout.door.y,
-              targetX: layout.door.x,
-              targetY: layout.door.y,
+              x: natural.door.x,
+              y: natural.door.y,
+              targetX: natural.door.x,
+              targetY: natural.door.y,
             });
           }
         }
@@ -643,10 +657,29 @@ export default function OfficeCanvas() {
       last = t;
 
       const officeState = stateRef.current;
-      const layout = layoutRef.current;
       const actors = actorsRef.current;
+      const parent = canvas.parentElement!;
+      const pw = Math.max(1, parent.clientWidth);
+      const ph = Math.max(1, parent.clientHeight);
 
-      // 論理サイズは組織規模で変わる(未受信時は最小サイズ)
+      // 画面をレターボックスなしで埋める: 自然サイズから等倍スケールを決め、
+      // 画面ぶんの論理サイズにレイアウトを配り直す
+      const natural = naturalRef.current;
+      if (natural && stateRef.current) {
+        const fit = Math.min(pw / natural.w, ph / natural.h);
+        const targetW = Math.ceil(pw / fit);
+        const targetH = Math.ceil(ph / fit);
+        const key = `${targetW}x${targetH}`;
+        if (layoutKeyRef.current !== key) {
+          layoutRef.current = computeLayout(stateRef.current.org, {
+            w: targetW,
+            h: targetH,
+          });
+          layoutKeyRef.current = key;
+        }
+      }
+      const layout = layoutRef.current;
+
       const lw = layout?.w ?? MIN_W;
       const lh = layout?.h ?? MIN_H;
       if (scene.width !== lw || scene.height !== lh) {
@@ -654,8 +687,7 @@ export default function OfficeCanvas() {
         scene.height = lh;
       }
 
-      const parent = canvas.parentElement!;
-      const scale = Math.min(parent.clientWidth / lw, parent.clientHeight / lh);
+      const scale = Math.min(pw / lw, ph / lh);
       const cw = Math.floor(lw * scale);
       const ch = Math.floor(lh * scale);
       const dpr = window.devicePixelRatio || 1;
@@ -919,8 +951,12 @@ export default function OfficeCanvas() {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center p-2">
-          <canvas ref={canvasRef} style={{ imageRendering: "pixelated" }} />
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+          <canvas
+            ref={canvasRef}
+            className="block"
+            style={{ imageRendering: "pixelated" }}
+          />
         </div>
 
         <aside className="flex w-80 shrink-0 flex-col overflow-y-auto border-l border-white/10 p-3 text-sm">
