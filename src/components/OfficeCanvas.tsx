@@ -143,7 +143,13 @@ function computeLayout(org: OrgView): Layout {
 
       const perRow = Math.min(3, Math.max(1, Math.floor((zoneW - 24) / 58)));
       const deskRows = Math.max(1, Math.ceil(team.members.length / perRow));
-      const rugH = Math.min(cellH - pad * 2, 26 + deskRows * 68);
+      // 席は必ず自ゾーンのセル内に収める(行間隔を人数に応じて詰める)
+      const maxRugH = cellH - pad * 2;
+      const rowSpacing =
+        deskRows > 1
+          ? Math.min(68, (maxRugH - 40 - 26) / (deskRows - 1))
+          : 68;
+      const rugH = Math.min(maxRugH, 40 + (deskRows - 1) * rowSpacing + 26);
       zones.push({
         name: team.name,
         color: team.color,
@@ -158,7 +164,7 @@ function computeLayout(org: OrgView): Layout {
         const c = j % perRow;
         const inRow = Math.min(perRow, team.members.length - r * perRow);
         const cx = zx + zoneW / 2 + (c - (inRow - 1) / 2) * 58;
-        const cy = zy + pad + 40 + r * 68;
+        const cy = zy + pad + 40 + r * rowSpacing;
         seats.set(m.agent, { agent: m.agent, displayName: m.displayName, x: cx, y: cy });
       });
     });
