@@ -20,7 +20,7 @@ function StatusBadge({ status }: { status: MemberStatus | undefined }) {
   }
   return (
     <span className="rounded bg-white/10 px-1.5 py-0.5 text-xs text-amber-100/50">
-      待機中
+      休憩中
     </span>
   );
 }

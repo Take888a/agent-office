@@ -96,7 +96,7 @@ export async function getOfficeState(): Promise<OfficeState> {
     statuses[m.agent] = state.statuses.get(m.agent) ?? {
       state: "idle",
       emoji: "",
-      activity: "待機中",
+      activity: "休憩中",
       detail: "",
       orderId: null,
     };
@@ -159,7 +159,7 @@ function setStatus(agent: string, status: Partial<MemberStatus> & { state: Membe
   const prev = state.statuses.get(agent);
   state.statuses.set(agent, {
     emoji: "",
-    activity: status.state === "idle" ? "待機中" : "作業中",
+    activity: status.state === "idle" ? "休憩中" : "作業中",
     detail: "",
     orderId: prev?.orderId ?? null,
     ...status,
@@ -324,7 +324,7 @@ async function runOrder(
           ) {
             const sub = delegation.get(block.tool_use_id);
             if (sub) {
-              setStatus(sub, { state: "idle", activity: "報告済み・待機中", orderId: null });
+              setStatus(sub, { state: "idle", activity: "報告済み・休憩中", orderId: null });
             }
           }
         }

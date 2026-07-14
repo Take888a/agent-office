@@ -99,6 +99,8 @@ interface Zone {
 interface Layout {
   seats: Map<string, Seat>;
   zones: Zone[];
+  /** 休憩室の立ち位置(待機中の社員はここにいる。席についてる=作業中) */
+  breakSpots: Map<string, { x: number; y: number }>;
   /** キャンバスの論理サイズ(組織規模に応じて広がる) */
   w: number;
   h: number;
@@ -137,16 +139,34 @@ function computeLayout(org: OrgView): Layout {
     ZONE_PAD * 2 +
     8;
 
-  // グリッド形状: 正方形に近づける(横長キャンバスなので列をやや多めに)
-  const cols = Math.max(1, Math.ceil(Math.sqrt(teams.length)));
-  const rows = Math.max(1, Math.ceil(teams.length / cols));
+  // 休憩室(上段右・コーヒーマシン付き): 全員収容を最大2行で。
+  // 上段の空きスペースを使い、キャンバスを下に伸ばさない
+  const headcount = 2 + teams.reduce((n, t) => n + t.members.length, 0);
+  const breakRows = headcount <= 4 ? 1 : 2;
+  const breakPerRow = Math.ceil(headcount / breakRows);
+  const breakW = breakPerRow * 26 + 56; // 右側にコーヒーマシンの場所を確保
+  const breakH = breakRows * 30 + 28;
 
+  // グリッド列数: 使い勝手のよい幅(チーム3列ぶん)に収まるなら横に並べ、
+  // 超える規模では正方形に近いグリッドにする
   const areaX = 16;
-  const areaY = 152;
-  const w = Math.max(MIN_W, areaX * 2 + cols * cellW);
-  const h = Math.max(MIN_H, areaY + rows * cellH + 16);
+  const colsBySqrt = Math.max(1, Math.ceil(Math.sqrt(teams.length)));
+  const colsByWidth = Math.max(1, Math.floor((MIN_W - areaX * 2) / cellW));
+  const cols = Math.min(
+    Math.max(1, teams.length),
+    Math.max(colsBySqrt, colsByWidth),
+  );
+  const rows = teams.length > 0 ? Math.ceil(teams.length / cols) : 0;
 
-  // 上段: 人事(受付・左) と 管理職(中央)
+  // 幅はコンテンツから算出(無駄な余白を作らない):
+  // チームグリッド幅 と 上段(管理職を中心に置いた上で休憩室が入る幅) の大きい方
+  const wTeams = areaX * 2 + cols * cellW;
+  const wTop = 2 * (breakW + 68);
+  const w = Math.max(320, wTeams, wTop);
+  // 端数の余り幅はセルへ均等配分(ゾーンが全幅に広がる)
+  const effCellW = (w - areaX * 2) / cols;
+
+  // 上段: 人事(左)・管理職(中央)・休憩室(右)
   seats.set(org.hr.agent, {
     agent: org.hr.agent,
     displayName: org.hr.displayName,
@@ -163,20 +183,48 @@ function computeLayout(org: OrgView): Layout {
   });
   zones.push({ name: "管理職", color: "#c9a227", x: w / 2 - 44, y: 72, w: 88, h: 66 });
 
+  const breakX = w - breakW - 16;
+  const breakY = 68;
+  zones.push({
+    name: "休憩室",
+    color: "#8a6a4a",
+    x: breakX,
+    y: breakY,
+    w: breakW,
+    h: breakH,
+  });
+  const breakSpots = new Map<string, { x: number; y: number }>();
+  const everyone = [
+    org.orchestrator.agent,
+    org.hr.agent,
+    ...teams.flatMap((t) => t.members.map((m) => m.agent)),
+  ];
+  everyone.forEach((agent, i) => {
+    const r = Math.floor(i / breakPerRow);
+    const c = i % breakPerRow;
+    breakSpots.set(agent, {
+      x: breakX + 18 + c * 26,
+      y: breakY + 32 + r * 30,
+    });
+  });
+
+  // チーム領域は上段(人事/管理職/休憩室の下端)の直下から
+  const areaY = Math.max(146, breakY + breakH + 10);
+
   // チームゾーン: 最終行は中央寄せ
   teams.forEach((team, i) => {
     const col = i % cols;
     const row = Math.floor(i / cols);
     const inRow = row === rows - 1 ? teams.length - row * cols : cols;
-    const rowOffset = ((cols - inRow) * cellW) / 2;
-    const zx = areaX + rowOffset + col * cellW;
+    const rowOffset = ((cols - inRow) * effCellW) / 2;
+    const zx = areaX + rowOffset + col * effCellW;
     const zy = areaY + row * cellH;
 
     const perRow = perRowOf(team.members.length);
     const deskRows = Math.max(1, Math.ceil(team.members.length / perRow));
     const rugW = Math.max(90, perRow * SEAT_W + 32);
     const rugH = ZONE_HEAD + (deskRows - 1) * SEAT_ROW_H + ZONE_FOOT;
-    const rugX = zx + (cellW - rugW) / 2;
+    const rugX = zx + (effCellW - rugW) / 2;
     zones.push({
       name: team.name,
       color: team.color,
@@ -196,13 +244,17 @@ function computeLayout(org: OrgView): Layout {
     });
   });
 
+  // 高さもコンテンツから算出
+  const h = areaY + rows * cellH + 14;
+
   return {
     seats,
     zones,
+    breakSpots,
     w,
     h,
     door: { x: 40, y: h + 20 },
-    coffee: { x: w - 44, y: 84 },
+    coffee: { x: breakX + breakW - 20, y: breakY + 42 },
   };
 }
 
@@ -524,22 +576,18 @@ export default function OfficeCanvas() {
         stateRef.current = s;
         const layout = computeLayout(s.org);
         layoutRef.current = layout;
-        // 座席が変わった/新入社員はドアから出勤
+        // 新入社員はドアから出勤(行き先は描画ループが状態に応じて決める)
         const actors = actorsRef.current;
         const seats = layout.seats;
-        for (const [agent, seat] of seats) {
-          const actor = actors.get(agent);
-          if (!actor) {
+        for (const agent of seats.keys()) {
+          if (!actors.has(agent)) {
             actors.set(agent, {
               agent,
               x: layout.door.x,
               y: layout.door.y,
-              targetX: seat.x,
-              targetY: seat.y + 12,
+              targetX: layout.door.x,
+              targetY: layout.door.y,
             });
-          } else {
-            actor.targetX = seat.x;
-            actor.targetY = seat.y + 12;
           }
         }
         for (const agent of [...actors.keys()]) {
@@ -618,7 +666,22 @@ export default function OfficeCanvas() {
         canvas.style.height = `${ch}px`;
       }
 
-      // --- 移動更新(出勤・席替え) ---
+      // --- 移動更新(作業中はデスクへ、待機中は休憩室へ) ---
+      if (layout && officeState) {
+        for (const actor of actors.values()) {
+          const working =
+            officeState.statuses[actor.agent]?.state === "working";
+          const seat = layout.seats.get(actor.agent);
+          const spot = layout.breakSpots.get(actor.agent);
+          if (working && seat) {
+            actor.targetX = seat.x;
+            actor.targetY = seat.y + 12;
+          } else if (spot) {
+            actor.targetX = spot.x;
+            actor.targetY = spot.y;
+          }
+        }
+      }
       for (const actor of actors.values()) {
         const dx = actor.targetX - actor.x;
         const dy = actor.targetY - actor.y;
@@ -670,7 +733,8 @@ export default function OfficeCanvas() {
             sprite =
               Math.floor(t / 350) % 2 === 0 ? SPRITE_BACK : SPRITE_BACK_TYPE;
           } else {
-            sprite = SPRITE_BACK;
+            // 休憩中: こちらを向いて立つ
+            sprite = SPRITE_FRONT;
           }
           const bob = moving && Math.floor(t / 250) % 2 === 0 ? -1 : 0;
           drawSprite(
