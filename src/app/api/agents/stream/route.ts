@@ -1,4 +1,4 @@
-import { listEmployees, subscribe } from "@/lib/office";
+import { getOfficeState, subscribe } from "@/lib/office";
 
 export const dynamic = "force-dynamic";
 
@@ -7,17 +7,23 @@ export async function GET(req: Request) {
 
   const stream = new ReadableStream({
     start(controller) {
-      const send = () => {
+      let sending = false;
+      const send = async () => {
+        if (sending) return;
+        sending = true;
         try {
+          const officeState = await getOfficeState();
           controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(listEmployees())}\n\n`),
+            encoder.encode(`data: ${JSON.stringify(officeState)}\n\n`),
           );
         } catch {
           // クライアント切断後は無視
+        } finally {
+          sending = false;
         }
       };
 
-      const unsubscribe = subscribe(send);
+      const unsubscribe = subscribe(() => void send());
       const keepalive = setInterval(() => {
         try {
           controller.enqueue(encoder.encode(": keepalive\n\n"));
@@ -25,7 +31,7 @@ export async function GET(req: Request) {
           // ignore
         }
       }, 15000);
-      send();
+      void send();
 
       req.signal.addEventListener("abort", () => {
         unsubscribe();

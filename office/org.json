@@ -1,0 +1,31 @@
+{
+  "orchestrator": { "agent": "manager", "displayName": "マネ" },
+  "hr": { "agent": "hr", "displayName": "ジン" },
+  "teams": [
+    {
+      "id": "dev",
+      "name": "開発チーム",
+      "color": "#4f7fc9",
+      "members": [
+        { "agent": "frontend-dev", "displayName": "ユキ", "role": "フロントエンド開発" },
+        { "agent": "backend-dev", "displayName": "タロウ", "role": "バックエンド開発" }
+      ]
+    },
+    {
+      "id": "qa",
+      "name": "品質チーム",
+      "color": "#4fa06a",
+      "members": [
+        { "agent": "qa-reviewer", "displayName": "ハナ", "role": "QA・コードレビュー" }
+      ]
+    },
+    {
+      "id": "research",
+      "name": "調査チーム",
+      "color": "#8659b5",
+      "members": [
+        { "agent": "researcher", "displayName": "ケン", "role": "技術調査" }
+      ]
+    }
+  ]
+}
